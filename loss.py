@@ -1,6 +1,6 @@
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
-import torchvision
 
 
 def gradient(input_tensor, direction):
@@ -28,10 +28,57 @@ def ave_gradient(input_tensor, direction):
 
 
 def smooth(input_l, input_r):
-    input_r = torchvision.transforms.functional.to_grayscale(input_r)
+    rgb_weights = torch.Tensor([0.2989, 0.5870, 0.1140])
+    input_r = torch.tensordot(input_r, rgb_weights, dims=([-1], [-1]))
+    input_r = torch.unsqueeze(input_r, -1)
+
+    return torch.mean(
+        gradient(input_l, 'x') * torch.exp(-10 * ave_gradient(input_r, 'x')) +
+        gradient(input_l, 'y') * torch.exp(-10 * ave_gradient(input_r, 'y'))
+    )
+
+
+class DecomLoss(nn.Module):
+
+    def __init__(self):
+        super(DecomLoss, self).__init__()
+
+    def forward(self, r_low, l_low, r_high, l_high, input_low, input_high):
+        l_low_3 = torch.cat((l_low, l_low, l_low), -1)
+        l_high_3 = torch.cat((l_high, l_high, l_high), -1)
+
+        recon_loss_low = torch.mean(torch.abs(r_low * l_low_3 - input_low))
+        recon_loss_high = torch.mean(torch.abs(r_high * l_high_3 - input_high))
+        recon_loss_mutal_low = torch.mean(torch.abs(r_high * l_low_3 - input_low))
+        recon_loss_mutal_high = torch.mean(torch.abs(r_low * l_high_3 - input_high))
+        equal_r_loss = torch.mean(torch.abs(r_low - r_high))
+
+        ismooth_loss_low = smooth(l_low, r_low)
+        ismooth_loss_high = smooth(l_high, r_high)
+
+        return \
+            recon_loss_low + recon_loss_high +\
+            0.001*recon_loss_mutal_low + 0.001*recon_loss_mutal_high + \
+            0.1*ismooth_loss_low + 0.1*ismooth_loss_high + \
+            0.01*equal_r_loss
+
+
+class RelightLoss(nn.Module):
+
+    def __init__(self):
+        super(RelightLoss, self).__init__()
+
+    def forward(self, l_delta, r_low, input_high):
+        l_delta_3 = torch.cat((l_delta, l_delta, l_delta), -1)
+
+        relight_loss = torch.mean(torch.abs(r_low * l_delta_3 - input_high))
+
+        ismooth_loss_delta = smooth(l_delta, r_low)
+
+        return relight_loss + 3 * ismooth_loss_delta
 
 
 if __name__ == '__main__':
     tensor = torch.rand(1, 300, 400, 1)
-    out_data = ave_gradient(tensor, 'x')
-    print(out_data.size())
+    out_data = smooth(tensor, torch.rand(1, 300, 400, 3))
+    print(out_data)

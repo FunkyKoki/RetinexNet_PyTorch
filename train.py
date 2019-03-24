@@ -1,8 +1,11 @@
+import os
 import torch
 import torch.backends.cudnn as cudnn
+import numpy as np
 import argparse
 from model import DecomNet, RelightNet
 from dataset import TheDataset
+from loss import DecomLoss, RelightLoss
 import tqdm
 
 
@@ -27,6 +30,8 @@ parser.add_argument('--decom', dest='decom', default=0,
 
 args = parser.parse_args()
 
+if not os.path.exists(args.ckpt_dir):
+    os.makedirs(args.ckpt_dir)
 
 decom_net = DecomNet()
 relight_net = RelightNet()
@@ -37,10 +42,16 @@ if args.use_gpu:
     cudnn.benchmark = True
     cudnn.enabled = True
 
+lr = args.start_lr * np.ones([args.epoch])
+lr[20:] = lr[0] / 10.0
+
 decom_optim = torch.optim.Adam(decom_net.parameters(), lr=args.start_lr)
 relight_optim = torch.optim.Adam(relight_net.parameters(), lr=args.start_lr)
 
 train_set = TheDataset()
+
+decom_criterion = DecomLoss()
+relight_criterion = RelightLoss()
 
 
 def train():
@@ -48,13 +59,59 @@ def train():
     relight_net.train()
 
     for epoch in range(args.epoch):
+        times_per_epoch, sum_loss = 0, 0.
 
         dataloader = torch.utils.data.Dataloader(train_set, batch_size=args.batch_size, shuffle=True,
                                                  num_workers=args.workers, pin_memory=True)
+        decom_optim.param_groups[0]['lr'] = lr[epoch]
 
         for data in tqdm.tqdm(dataloader):
+            times_per_epoch += 1
             low_im, high_im = data
             low_im, high_im = low_im.cuda(), high_im.cuda()
 
-            rl_low, r_low, l_low = decom_net(low_im)
-            rl_high, r_high, l_high = decom_net(high_im)
+            decom_optim.zero_grad()
+            _, r_low, l_low = decom_net(low_im)
+            _, r_high, l_high = decom_net(high_im)
+            loss = decom_criterion(r_low, l_low, r_high, l_high, low_im, high_im)
+            loss.backward()
+            decom_optim.step()
+
+            sum_loss += loss
+
+        print('epoch: ' + str(epoch) + ' | loss: ' + str(sum_loss / times_per_epoch))
+        if (epoch+1) % args.save_interval == 0:
+            torch.save(decom_net.state_dict(), args.ckpt_dir + '/decom_' + str(epoch) + '.pth')
+
+    torch.save(decom_net.state_dict(), args.ckpt_dir + '/decom_final.pth')
+
+    for epoch in range(args.epoch):
+        times_per_epoch, sum_loss = 0, 0.
+
+        dataloader = torch.utils.data.Dataloader(train_set, batch_size=args.batch_size, shuffle=True,
+                                                 num_workers=args.workers, pin_memory=True)
+        relight_optim.param_groups[0]['lr'] = lr[epoch]
+
+        for data in tqdm.tqdm(dataloader):
+            times_per_epoch += 1
+            low_im, high_im = data
+            low_im, high_im = low_im.cuda(), high_im.cuda()
+
+            relight_optim.zero_grad()
+            lr_low, r_low, _ = decom_net(low_im)
+            l_delta = relight_net(lr_low.detach())
+            loss = relight_criterion(l_delta, r_low.detach(), high_im)
+            loss.backward()
+            relight_optim.step()
+
+            sum_loss += loss
+
+        print('epoch: ' + str(epoch) + ' | loss: ' + str(sum_loss / times_per_epoch))
+        if (epoch+1) % args.save_interval == 0:
+            torch.save(relight_net.state_dict(), args.ckpt_dir + '/relight_' + str(epoch) + '.pth')
+
+    torch.save(relight_net.state_dict(), args.ckpt_dir + '/relight_final.pth')
+
+
+if __name__ == '__main__':
+    train()
